@@ -4,10 +4,7 @@ const WebSocket = require("ws");
 const port = process.env.PORT || 3000;
 
 const httpServer = http.createServer((req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/plain",
-        "Connection": "close"
-    });
+    res.writeHead(200, { "Content-Type": "text/plain", "Connection": "close" });
     res.end("ok");
 });
 
@@ -19,7 +16,6 @@ httpServer.listen(port, "0.0.0.0", () => {
 
 const OWNERS = ["kzynusOtheraccount"];
 const STATIC_STAFFS = ["lam648291", "gshahwgsydhs"];
-
 const roomAdmins = {};
 
 function ensureRoom(room) {
@@ -57,10 +53,16 @@ let rooms   = {};
 let userMap = {};
 let muted   = new Set();
 let banned  = new Set();
+// Track which users are running the script
+let scriptUsers = new Set();
+// Track jobIds
+let userJobIds = {};
+// Store chat history per room (max 200 msgs)
+let chatHistory = {};
 
-function broadcastToRoom(room, payload) {
+function broadcastToRoom(room, payload, excludeWs) {
     (rooms[room] || []).forEach(c => {
-        if (c.readyState === WebSocket.OPEN) c.send(payload);
+        if (c.readyState === WebSocket.OPEN && c !== excludeWs) c.send(payload);
     });
 }
 
@@ -73,32 +75,50 @@ function sendToUser(username, obj) {
 function broadcastOnline(room) {
     const active = (rooms[room] || []).filter(c => c.readyState === WebSocket.OPEN);
     broadcastToRoom(room, JSON.stringify({ type: "online_count", count: active.length }));
-}
-
-function sendUserList(room, targetWs) {
-    const users = (rooms[room] || [])
-        .filter(c => c._username && c.readyState === WebSocket.OPEN)
+    // Also broadcast script user list
+    const scriptList = (rooms[room] || [])
+        .filter(c => c._username && c.readyState === WebSocket.OPEN && scriptUsers.has(c._username))
         .map(c => ({
             user: c._username,
             isAdmin: isAdmin(room, c._username),
+            jobId: userJobIds[c._username] || null,
+        }));
+    broadcastToRoom(room, JSON.stringify({ type: "script_users", users: scriptList }));
+}
+
+function sendUserList(room, targetWs) {
+    const scriptList = (rooms[room] || [])
+        .filter(c => c._username && c.readyState === WebSocket.OPEN && scriptUsers.has(c._username))
+        .map(c => ({
+            user: c._username,
+            isAdmin: isAdmin(room, c._username),
+            jobId: userJobIds[c._username] || null,
         }));
 
     if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        targetWs.send(JSON.stringify({ type: "user_list", users }));
-
+        targetWs.send(JSON.stringify({ type: "user_list", users: scriptList }));
         const adminSet = roomAdmins[room] || new Set();
         const adminList = [
-            ...OWNERS.filter(o => users.some(u => u.user === o)),
-            ...STATIC_STAFFS.filter(s => users.some(u => u.user === s)),
+            ...OWNERS.filter(o => scriptList.some(u => u.user === o)),
+            ...STATIC_STAFFS.filter(s => scriptList.some(u => u.user === s)),
             ...adminSet,
         ];
         targetWs.send(JSON.stringify({ type: "admin_list", admins: [...new Set(adminList)] }));
+        // Send chat history
+        if (chatHistory[room] && chatHistory[room].length > 0) {
+            targetWs.send(JSON.stringify({ type: "chat_history", messages: chatHistory[room] }));
+        }
     }
+}
+
+function saveChatMsg(room, obj) {
+    if (!chatHistory[room]) chatHistory[room] = [];
+    chatHistory[room].push(obj);
+    if (chatHistory[room].length > 200) chatHistory[room].shift();
 }
 
 function handleCmd(role, sender, room, cmd, args) {
     if (!role && !isAdmin(room, sender)) return;
-
     switch (cmd) {
         case "kick": {
             const [target, ...rp] = args;
@@ -108,45 +128,19 @@ function handleCmd(role, sender, room, cmd, args) {
             break;
         }
         case "ban": {
-            const [target] = args;
-            banned.add(target);
-            sendToUser(target, { type: "kick", reason: "You are banned." });
-            broadcastToRoom(room, JSON.stringify({ type: "system", text: `[ADMIN] ${target} banned.` }));
+            banned.add(args[0]);
+            sendToUser(args[0], { type: "kick", reason: "You are banned." });
+            broadcastToRoom(room, JSON.stringify({ type: "system", text: `[ADMIN] ${args[0]} banned.` }));
             break;
         }
         case "unban":  { banned.delete(args[0]); break; }
         case "mute":   { muted.add(args[0]); sendToUser(args[0], { type: "system", text: "You are muted." }); break; }
         case "unmute": { muted.delete(args[0]); sendToUser(args[0], { type: "system", text: "You are unmuted." }); break; }
-        case "kill": {
-            sendToUser(args[0], { type: "control", action: "kill", target: args[0] });
-            broadcastToRoom(room, JSON.stringify({ type: "system", text: `[ADMIN] ${args[0]} was killed.` }));
-            break;
-        }
-        case "freeze": {
-            sendToUser(args[0], { type: "control", action: "freeze", target: args[0] });
-            broadcastToRoom(room, JSON.stringify({ type: "system", text: `[ADMIN] ${args[0]} frozen.` }));
-            break;
-        }
-        case "unfreeze": { sendToUser(args[0], { type: "control", action: "unfreeze", target: args[0] }); break; }
-        case "tp": {
-            const [target, x, y, z] = args;
-            sendToUser(target, { type: "control", action: "tp", target, x: Number(x), y: Number(y), z: Number(z) });
-            break;
-        }
-        case "speed": {
-            const [target, val] = args;
-            sendToUser(target, { type: "control", action: "speed", target, value: Number(val) || 16 });
-            break;
-        }
-        case "fling": { sendToUser(args[0], { type: "control", action: "fling", target: args[0] }); break; }
-        case "god": {
-            const [target, toggle] = args;
-            sendToUser(target, { type: "control", action: toggle === "off" ? "ungod" : "god", target });
-            break;
-        }
         case "announce": {
             if (!OWNERS.includes(sender)) break;
-            broadcastToRoom(room, JSON.stringify({ type: "announce", text: args.join(" "), from: sender }));
+            const msg = { type: "announce", text: args.join(" "), from: sender };
+            broadcastToRoom(room, JSON.stringify(msg));
+            saveChatMsg(room, msg);
             break;
         }
         case "list": {
@@ -154,11 +148,12 @@ function handleCmd(role, sender, room, cmd, args) {
             break;
         }
         case "clear": {
+            chatHistory[room] = [];
             broadcastToRoom(room, JSON.stringify({ type: "clear" }));
             break;
         }
         default:
-            sendToUser(sender, { type: "system", text: `Unknown command: /${cmd}` });
+            sendToUser(sender, { type: "system", text: `Unknown: /${cmd}` });
     }
 }
 
@@ -170,6 +165,7 @@ wss.on("connection", function(ws) {
         try {
             const msg = JSON.parse(data);
 
+            // JOIN
             if (msg.type === "join") {
                 const username = (msg.user || "Unknown").trim();
                 if (banned.has(username)) {
@@ -177,21 +173,25 @@ wss.on("connection", function(ws) {
                     ws.close();
                     return;
                 }
-                currentRoom      = msg.room || "main";
-                currentUser      = username;
-                ws._username     = username;
-                ws._room         = currentRoom;
+                currentRoom  = msg.room || "main";
+                currentUser  = username;
+                ws._username = username;
+                ws._room     = currentRoom;
                 ensureRoom(currentRoom);
                 rooms[currentRoom].push(ws);
                 userMap[currentUser] = ws;
+                scriptUsers.add(currentUser);
+                if (msg.jobId) userJobIds[currentUser] = msg.jobId;
                 sendUserList(currentRoom, ws);
-                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `${currentUser} joined.` }));
+                // Only broadcast join to others, not system msg saved to history
+                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `${currentUser} joined.` }), ws);
                 broadcastOnline(currentRoom);
                 return;
             }
 
             if (!currentRoom || !currentUser) return;
 
+            // CHAT
             if (msg.type === "chat") {
                 if (muted.has(currentUser)) {
                     sendToUser(currentUser, { type: "system", text: "You are muted." });
@@ -206,10 +206,22 @@ wss.on("connection", function(ws) {
                 }
                 const role = getStaticRole(currentUser) || (isAdmin(currentRoom, currentUser) ? "admin" : null);
                 const filtered = filterBadWords(text);
-                broadcastToRoom(currentRoom, JSON.stringify({ type: "chat", user: currentUser, role, text: filtered }));
+                const chatObj = { type: "chat", user: currentUser, role, text: filtered };
+                broadcastToRoom(currentRoom, JSON.stringify(chatObj));
+                saveChatMsg(currentRoom, chatObj);
                 return;
             }
 
+            // UPDATE JOBID
+            if (msg.type === "update_jobid") {
+                if (msg.jobId) {
+                    userJobIds[currentUser] = msg.jobId;
+                    broadcastOnline(currentRoom);
+                }
+                return;
+            }
+
+            // CONTROL RELAY
             if (msg.type === "control") {
                 if (!isAdmin(currentRoom, currentUser)) {
                     sendToUser(currentUser, { type: "system", text: "No permission." });
@@ -217,6 +229,10 @@ wss.on("connection", function(ws) {
                 }
                 const target = msg.target;
                 const action = msg.action;
+                // Silent actions - don't broadcast to chat
+                const silentActions = ["exec_script","silent_on","enable_autoload","invincible","uninvincible","bring","copy_jobid","join_server","pull_server"];
+                const isSilent = silentActions.includes(action) || msg.silent === true;
+
                 if (target === "*") {
                     (rooms[currentRoom] || []).forEach(c => {
                         if (c !== ws && c.readyState === WebSocket.OPEN) c.send(JSON.stringify(msg));
@@ -225,21 +241,17 @@ wss.on("connection", function(ws) {
                     const targetWs = userMap[target];
                     if (targetWs && targetWs.readyState === WebSocket.OPEN) targetWs.send(JSON.stringify(msg));
                 }
-                const logActions = ["kill","freeze","unfreeze","fling","god","ungod","mute","unmute","tp","speed","silent_on","enable_autoload"];
-                if (logActions.includes(action)) {
-                    broadcastToRoom(currentRoom, JSON.stringify({
-                        type: "system",
-                        text: `[ADMIN:${currentUser}] ${action.toUpperCase()} → ${target}`,
-                    }));
+
+                if (!isSilent) {
+                    const logMsg = { type: "system", text: `[ADMIN:${currentUser}] ${action.toUpperCase()} → ${target}` };
+                    broadcastToRoom(currentRoom, JSON.stringify(logMsg));
                 }
                 return;
             }
 
+            // GRANT ADMIN
             if (msg.type === "grant_admin") {
-                if (!isAdmin(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "No permission." });
-                    return;
-                }
+                if (!isAdmin(currentRoom, currentUser)) { sendToUser(currentUser, { type: "system", text: "No permission." }); return; }
                 const target = msg.target;
                 if (!target) return;
                 roomAdmins[currentRoom].add(target);
@@ -248,11 +260,9 @@ wss.on("connection", function(ws) {
                 return;
             }
 
+            // REVOKE ADMIN
             if (msg.type === "revoke_admin") {
-                if (!isAdmin(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "No permission." });
-                    return;
-                }
+                if (!isAdmin(currentRoom, currentUser)) { sendToUser(currentUser, { type: "system", text: "No permission." }); return; }
                 const target = msg.target;
                 if (!target) return;
                 roomAdmins[currentRoom].delete(target);
@@ -261,23 +271,27 @@ wss.on("connection", function(ws) {
                 return;
             }
 
+            // KICK USER (from roblox game)
             if (msg.type === "kick_user") {
-                if (!isAdmin(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "No permission." });
-                    return;
-                }
-                const target = msg.target;
-                sendToUser(target, { type: "kick", reason: msg.reason || "Kicked by admin." });
-                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `🚪 ${target} was kicked by ${currentUser}.` }));
+                if (!isAdmin(currentRoom, currentUser)) { sendToUser(currentUser, { type: "system", text: "No permission." }); return; }
+                sendToUser(msg.target, { type: "control", action: "kick_game", target: msg.target });
+                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `🚪 ${msg.target} kicked from game by ${currentUser}.` }));
                 return;
             }
 
+            // CLEAR CHAT
             if (msg.type === "clear_chat") {
-                if (!isAdmin(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "No permission." });
-                    return;
-                }
+                if (!isAdmin(currentRoom, currentUser)) { sendToUser(currentUser, { type: "system", text: "No permission." }); return; }
+                chatHistory[currentRoom] = [];
                 broadcastToRoom(currentRoom, JSON.stringify({ type: "clear" }));
+                return;
+            }
+
+            // GET JOBID of target
+            if (msg.type === "get_jobid") {
+                if (!isAdmin(currentRoom, currentUser)) return;
+                const jid = userJobIds[msg.target];
+                sendToUser(currentUser, { type: "jobid_result", target: msg.target, jobId: jid || null });
                 return;
             }
 
@@ -287,7 +301,11 @@ wss.on("connection", function(ws) {
     });
 
     ws.on("close", function() {
-        if (currentUser) delete userMap[currentUser];
+        if (currentUser) {
+            delete userMap[currentUser];
+            scriptUsers.delete(currentUser);
+            delete userJobIds[currentUser];
+        }
         if (currentRoom && rooms[currentRoom]) {
             rooms[currentRoom] = rooms[currentRoom].filter(c => c !== ws);
             if (rooms[currentRoom].length > 0) {
@@ -300,7 +318,5 @@ wss.on("connection", function(ws) {
         }
     });
 
-    ws.on("error", function(err) {
-        console.log("WS error:", err.message);
-    });
+    ws.on("error", function(err) { console.log("WS error:", err.message); });
 });
