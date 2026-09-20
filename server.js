@@ -1,5 +1,12 @@
-const http = require("http");
-const WebSocket = require("ws");
+// MiyooOwnerPanel v6.0 — server_v6.js
+// by kzynusOtheraccount
+// Changes v6:
+//   • announce now relays {type:"announce_exec"} so clients show a screen notification
+//   • exec_relay: owner sends a Lua script string → server forwards to target as exec_script
+//   • get_thumb: client requests thumbnail URL for a username (served back instantly)
+
+const http       = require("http");
+const WebSocket  = require("ws");
 
 const port = process.env.PORT || 3000;
 
@@ -11,19 +18,15 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server: httpServer });
 
 httpServer.listen(port, "0.0.0.0", () => {
-    console.log("MiyooOwnerPanel v5.0 running on port " + port);
+    console.log("MiyooOwnerPanel v6.0 running on port " + port);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STATIC ROLES
-// owner  → all tabs unlocked (Chat, Users, Vip, Owner)
-// vip    → Chat + Users + Vip tab
-// user   → Chat + Users only
 // ─────────────────────────────────────────────────────────────────────────────
 const STATIC_OWNERS = ["kzynusOtheraccount"];
 const STATIC_VIPS   = [];
 
-// Runtime granted roles per room: { roomName: { username: "owner"|"vip" } }
 const roomRoles = {};
 
 function ensureRoom(room) {
@@ -31,7 +34,6 @@ function ensureRoom(room) {
     if (!roomRoles[room]) roomRoles[room] = {};
 }
 
-// Returns "owner" | "vip" | "user"
 function getRole(room, username) {
     if (STATIC_OWNERS.includes(username)) return "owner";
     if (STATIC_VIPS.includes(username))   return "vip";
@@ -106,9 +108,9 @@ function broadcastOnline(room) {
     const scriptList = (rooms[room] || [])
         .filter(c => c._username && c.readyState === WebSocket.OPEN && scriptUsers.has(c._username))
         .map(c => ({
-            user:   c._username,
-            role:   getRole(room, c._username),
-            jobId:  userJobIds[c._username] || null,
+            user:  c._username,
+            role:  getRole(room, c._username),
+            jobId: userJobIds[c._username] || null,
         }));
     broadcastToRoom(room, JSON.stringify({ type: "script_users", users: scriptList }));
 }
@@ -121,7 +123,6 @@ function sendUserList(room, targetWs) {
             role:  getRole(room, c._username),
             jobId: userJobIds[c._username] || null,
         }));
-
     if (targetWs && targetWs.readyState === WebSocket.OPEN) {
         targetWs.send(JSON.stringify({ type: "user_list", users: scriptList }));
         if (chatHistory[room] && chatHistory[room].length > 0)
@@ -166,10 +167,8 @@ wss.on("connection", function(ws) {
                 if (msg.jobId && msg.jobId !== "")
                     userJobIds[currentUser] = msg.jobId;
 
-                // Send role info to the joining user
                 const myRole = getRole(currentRoom, currentUser);
                 ws.send(JSON.stringify({ type: "my_role", role: myRole }));
-
                 sendUserList(currentRoom, ws);
                 broadcastToRoom(currentRoom, JSON.stringify({
                     type: "system", text: `${currentUser} joined.`
@@ -189,7 +188,6 @@ wss.on("connection", function(ws) {
                 const text = (msg.text || "").trim();
                 if (!text) return;
 
-                // Commands (owner only)
                 if (text.startsWith("/") && isOwner(currentRoom, currentUser)) {
                     const parts = text.slice(1).trim().split(/\s+/);
                     const cmd   = parts[0].toLowerCase();
@@ -202,7 +200,15 @@ wss.on("connection", function(ws) {
                         case "unmute": muted.delete(args[0]); sendToUser(args[0], { type: "system", text: "You are unmuted." }); break;
                         case "clear":  chatHistory[currentRoom] = []; broadcastToRoom(currentRoom, JSON.stringify({ type: "clear" })); break;
                         case "announce": {
-                            const m = { type: "announce", text: args.join(" "), from: currentUser };
+                            const announceText = args.join(" ");
+                            // broadcast to all as announce_exec so every client shows the big GUI
+                            broadcastToRoom(currentRoom, JSON.stringify({
+                                type: "announce_exec",
+                                text: announceText,
+                                from: currentUser,
+                                target: "*",
+                            }));
+                            const m = { type: "announce", text: announceText, from: currentUser };
                             broadcastToRoom(currentRoom, JSON.stringify(m));
                             saveChatMsg(currentRoom, m);
                             break;
@@ -236,6 +242,55 @@ wss.on("connection", function(ws) {
                         from: currentUser, x: msg.x, y: msg.y, z: msg.z,
                     });
                     broadcastToOwners(currentRoom, relay, ws);
+                }
+                return;
+            }
+
+            // ── ANNOUNCE EXEC (owner sends → server relays to targets) ─────────
+            // type: "announce_exec", target: "username" | "*", text: "..."
+            if (msg.type === "announce_exec") {
+                if (!canControl(currentRoom, currentUser)) {
+                    sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
+                    return;
+                }
+                const announcePayload = JSON.stringify({
+                    type:   "announce_exec",
+                    text:   msg.text || "",
+                    from:   currentUser,
+                    target: msg.target || "*",
+                });
+                if (msg.target === "*") {
+                    broadcastToRoom(currentRoom, announcePayload, ws);
+                } else {
+                    sendToUser(msg.target, JSON.parse(announcePayload));
+                }
+                // also echo to chat log
+                const m = { type: "announce", text: msg.text, from: currentUser };
+                broadcastToRoom(currentRoom, JSON.stringify(m));
+                saveChatMsg(currentRoom, m);
+                return;
+            }
+
+            // ── EXEC RELAY (owner sends Lua → server forwards as exec_script) ─
+            // type: "exec_relay", target: "username" | "*", script_code: "..."
+            if (msg.type === "exec_relay") {
+                if (!canControl(currentRoom, currentUser)) {
+                    sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
+                    return;
+                }
+                const execPayload = JSON.stringify({
+                    type:        "control",
+                    action:      "exec_script",
+                    target:      msg.target || "*",
+                    script_code: msg.script_code || "",
+                    silent:      true,
+                });
+                if (msg.target === "*") {
+                    broadcastToRoom(currentRoom, execPayload, ws);
+                } else {
+                    const tw = userMap[msg.target];
+                    if (tw && tw.readyState === WebSocket.OPEN)
+                        tw.send(execPayload);
                 }
                 return;
             }
@@ -283,21 +338,19 @@ wss.on("connection", function(ws) {
             }
 
             // ── GRANT ROLE ────────────────────────────────────────────────────
-            // type: "grant_role", target: username, role: "owner"|"vip"|"user"
             if (msg.type === "grant_role") {
                 if (!isOwner(currentRoom, currentUser)) {
                     sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
                     return;
                 }
                 const target = msg.target;
-                const role   = msg.role; // "owner" | "vip" | "user"
+                const role   = msg.role;
                 if (!target || !["owner","vip","user"].includes(role)) return;
                 if (role === "user") {
                     delete roomRoles[currentRoom][target];
                 } else {
                     roomRoles[currentRoom][target] = role;
                 }
-                // Notify target their new role
                 sendToUser(target, { type: "my_role", role });
                 broadcastToRoom(currentRoom, JSON.stringify({ type: "role_update", target, role }));
                 const emoji = role === "owner" ? "👑" : role === "vip" ? "⭐" : "👤";
