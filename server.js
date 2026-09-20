@@ -11,7 +11,7 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server: httpServer });
 
 httpServer.listen(port, "0.0.0.0", () => {
-    console.log("Hub running on port " + port);
+    console.log("Hub v4.0 running on port " + port);
 });
 
 const OWNERS        = ["kzynusOtheraccount"];
@@ -57,11 +57,28 @@ let scriptUsers = new Set();
 let userJobIds  = {};
 let chatHistory = {};
 
+// ── pos broadcast tracking ──────────────────────────────────────────
+// Track which users are sharing position so server knows to relay
+let posSharing = new Set();
+
 // ── helpers ──────────────────────────────────────────────
 function broadcastToRoom(room, payload, excludeWs) {
     (rooms[room] || []).forEach(c => {
         if (c.readyState === WebSocket.OPEN && c !== excludeWs)
             c.send(payload);
+    });
+}
+
+// Broadcast only to admins in room (for pos_broadcast relay)
+function broadcastToAdmins(room, payload, excludeWs) {
+    (rooms[room] || []).forEach(c => {
+        if (c.readyState === WebSocket.OPEN
+            && c !== excludeWs
+            && c._username
+            && isAdmin(room, c._username))
+        {
+            c.send(payload);
+        }
     });
 }
 
@@ -180,7 +197,6 @@ wss.on("connection", function(ws) {
                 userMap[currentUser] = ws;
                 scriptUsers.add(currentUser);
 
-                // Accept jobId even if it looks like a fallback string
                 if (msg.jobId && msg.jobId !== "") {
                     userJobIds[currentUser] = msg.jobId;
                 }
@@ -225,24 +241,57 @@ wss.on("connection", function(ws) {
                 return;
             }
 
+            // ── POS BROADCAST (AUTO TP) ──
+            // Target sends pos_broadcast → server relays to ALL ADMINS in room (not back to sender)
+            // No permission check needed: target is just reporting their own position
+            if (msg.type === "pos_broadcast") {
+                // Only relay if user is marked as sharing
+                if (posSharing.has(currentUser)) {
+                    const relayPayload = JSON.stringify({
+                        type:   "pos_broadcast",
+                        action: "share_pos",
+                        from:   currentUser,
+                        x:      msg.x,
+                        y:      msg.y,
+                        z:      msg.z,
+                    });
+                    // Relay to all admins in room except sender
+                    broadcastToAdmins(currentRoom, relayPayload, ws);
+                }
+                return;
+            }
+
             // ── CONTROL RELAY ──
             if (msg.type === "control") {
                 if (!isAdmin(currentRoom, currentUser)) {
+                    // Special case: target can send share_pos back as a control
+                    // but we handle that via pos_broadcast now, so block non-admins
                     sendToUser(currentUser, { type: "system", text: "No permission." });
                     return;
                 }
+
                 const target = msg.target;
                 const action = msg.action;
 
-                // Actions that are always silent (no broadcast to chat)
+                // Silent actions list
                 const silentActions = new Set([
                     "exec_script", "silent_on", "enable_autoload",
                     "invincible", "uninvincible", "bring",
                     "copy_jobid", "join_server", "pull_server",
                     "start_pos_share", "stop_pos_share", "share_pos",
                     "no_sleep_on", "no_sleep_off",
+                    "invisible_self", "visible_self",
+                    "invisible_other", "visible_other",
                 ]);
                 const isSilent = silentActions.has(action) || msg.silent === true;
+
+                // Track pos share state
+                if (action === "start_pos_share" && target !== "*") {
+                    posSharing.add(target);
+                }
+                if (action === "stop_pos_share" && target !== "*") {
+                    posSharing.delete(target);
+                }
 
                 if (target === "*") {
                     (rooms[currentRoom] || []).forEach(c => {
@@ -319,7 +368,6 @@ wss.on("connection", function(ws) {
             }
 
             // ── GET JOBID ──
-            // Now also returns fresh server-side jobId, not just what client sent on join
             if (msg.type === "get_jobid") {
                 if (!isAdmin(currentRoom, currentUser)) return;
                 const target  = msg.target;
@@ -342,6 +390,7 @@ wss.on("connection", function(ws) {
             delete userMap[currentUser];
             scriptUsers.delete(currentUser);
             delete userJobIds[currentUser];
+            posSharing.delete(currentUser); // stop pos sharing on disconnect
         }
         if (currentRoom && rooms[currentRoom]) {
             rooms[currentRoom] = rooms[currentRoom].filter(c => c !== ws);
