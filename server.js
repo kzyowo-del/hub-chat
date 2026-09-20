@@ -17,7 +17,7 @@ httpServer.listen(port, "0.0.0.0", () => {
     console.log("Hub running on port " + port);
 });
 
-const OWNERS = ["Kzynusotheraccount"];
+const OWNERS = ["kzynusOtheraccount"];
 const STATIC_STAFFS = ["lam648291", "gshahwgsydhs"];
 
 const roomAdmins = {};
