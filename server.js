@@ -1,28 +1,29 @@
-            console.log("Parse error:", e.message);
-        }
-    });
+const http = require("http");
+const WebSocket = require("ws");
 
-    // ── DISCONNECT ────────────────────────────────────────
-    ws.on("close", function() {
-        if (currentUser) {
-            delete userMap[currentUser];
-        }
-        if (currentRoom && rooms[currentRoom]) {
-            rooms[currentRoom] = rooms[currentRoom].filter(c => c !== ws);
-            if (rooms[currentRoom].length > 0) {
-                broadcastToRoom(currentRoom, JSON.stringify({
-                    type: "system",
-                    text: `${currentUser} left.`,
-                }));
-                broadcastOnline(currentRoom);
-            } else {
-                delete rooms[currentRoom];
-                delete roomAdmins[currentRoom];
-            }
-        }
-    });
+const port = process.env.PORT || 3000;
 
-    ws.on("error", function(err) {
-        console.log("WS error:", err.message);
-    });
+// HTTP server để Render health check / UptimeRobot ping
+const httpServer = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end("ok");
 });
+
+const wss = new WebSocket.Server({ server: httpServer });
+
+httpServer.listen(port, () => {
+    console.log("Hub running on port " + port);
+});
+
+// =====================
+// STATIC ROLES
+// =====================
+const OWNERS = ["Kzynusotheraccount"];
+const STATIC_STAFFS = ["lam648291", "gshahwgsydhs"];
+
+const roomAdmins = {};
+
+function ensureRoom(room) {
+    if (!rooms[room]) rooms[room] = [];
+    if (!roomAdmins[room]) roomAdmins[room] = new Set();
+}
