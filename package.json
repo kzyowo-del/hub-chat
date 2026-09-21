@@ -1,11 +1,15 @@
 {
-  "name": "hub-chat",
-  "version": "1.0.0",
+  "name": "miyoo-owner-panel",
+  "version": "7.1.0",
+  "description": "WebSocket server for MiyooOwnerPanel Roblox",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=16.x"
   }
 }
