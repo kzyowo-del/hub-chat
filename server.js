@@ -1,9 +1,10 @@
-// MiyooOwnerPanel v7.3 — server.js
+// MiyooOwnerPanel v7.4 — server.js
 // by kzynusOtheraccount & Verity
 
 const http       = require("http");
 const WebSocket  = require("ws");
 
+// Railway tự động cấp PORT qua process.env.PORT
 const port = process.env.PORT || 3000;
 
 const httpServer = http.createServer((req, res) => {
@@ -14,7 +15,7 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server: httpServer });
 
 httpServer.listen(port, "0.0.0.0", () => {
-    console.log("MiyooOwnerPanel v7.3 running on port " + port);
+    console.log("MiyooOwnerPanel v7.4 running on port " + port);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,6 +51,22 @@ function getRole(room, username) {
 function isOwner(room, username) { return getRole(room, username) === "owner"; }
 function isVip(room, username)   { const r = getRole(room, username); return r === "owner" || r === "vip"; }
 function canControl(room, username) { return isOwner(room, username); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BAD WORD FILTER
+// ─────────────────────────────────────────────────────────────────────────────
+const BAD_WORDS = [
+    "nigger","nigga","fuck","shit","bitch","dick","pussy","cunt",
+    "địt","lồn","cặc","buồi","đụ","đéo","mẹ mày","bố mày",
+];
+function filterBadWords(text) {
+    let r = text;
+    for (const w of BAD_WORDS) {
+        const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        r = r.replace(new RegExp(`\\b${esc}\\b`, "gi"), "*".repeat(w.length));
+    }
+    return r;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -170,12 +187,21 @@ wss.on("connection", function(ws) {
                         case "mute":   muted.add(args[0]);    sendToUser(args[0], { type: "system", text: "You are muted." }); break;
                         case "unmute": muted.delete(args[0]); sendToUser(args[0], { type: "system", text: "You are unmuted." }); break;
                         case "clear":  chatHistory[currentRoom] = []; broadcastToRoom(currentRoom, JSON.stringify({ type: "clear" })); break;
+                        case "announce": {
+                            const announceText = args.join(" ");
+                            broadcastToRoom(currentRoom, JSON.stringify({ type: "announce_exec", text: announceText, from: currentUser, target: "*" }));
+                            const m = { type: "announce", text: announceText, from: currentUser };
+                            broadcastToRoom(currentRoom, JSON.stringify(m));
+                            saveChatMsg(currentRoom, m);
+                            break;
+                        }
                     }
                     return;
                 }
 
                 const role     = getRole(currentRoom, currentUser);
-                const chatObj  = { type: "chat", user: currentUser, role, text: text };
+                const filtered = filterBadWords(text);
+                const chatObj  = { type: "chat", user: currentUser, role, text: filtered };
                 broadcastToRoom(currentRoom, JSON.stringify(chatObj));
                 saveChatMsg(currentRoom, chatObj);
                 return;
