@@ -1,18 +1,15 @@
-// MiyooOwnerPanel v7.1 — server_v7.js
+// MiyooOwnerPanel v7.1 — server.js
 // by kzynusOtheraccount & Verity
-// Changes v7.1:
-//   • Added ping handler for keepalive
-//   • Added silent_off to silentActions
-//   • Fixed exec_relay for Op Executor support
 
 const http       = require("http");
 const WebSocket  = require("ws");
 
+// Railway tự động cấp PORT qua process.env.PORT
 const port = process.env.PORT || 3000;
 
 const httpServer = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain", "Connection": "close" });
-    res.end("ok");
+    res.end("Miyoo Owner Panel Server is running.");
 });
 
 const wss = new WebSocket.Server({ server: httpServer });
@@ -27,7 +24,15 @@ httpServer.listen(port, "0.0.0.0", () => {
 const STATIC_OWNERS = ["kzynusOtheraccount"];
 const STATIC_VIPS   = [];
 
-const roomRoles = {};
+let rooms       = {};
+let roomRoles   = {};
+let userMap     = {};
+let muted       = new Set();
+let banned      = new Set();
+let scriptUsers = new Set();
+let userJobIds  = {};
+let chatHistory = {};
+let posSharing  = new Set();
 
 function ensureRoom(room) {
     if (!rooms[room])     rooms[room]     = [];
@@ -63,34 +68,17 @@ function filterBadWords(text) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STATE
-// ─────────────────────────────────────────────────────────────────────────────
-let rooms       = {};
-let userMap     = {};
-let muted       = new Set();
-let banned      = new Set();
-let scriptUsers = new Set();
-let userJobIds  = {};
-let chatHistory = {};
-let posSharing  = new Set();
-
-// ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 function broadcastToRoom(room, payload, excludeWs) {
     (rooms[room] || []).forEach(c => {
-        if (c.readyState === WebSocket.OPEN && c !== excludeWs)
-            c.send(payload);
+        if (c.readyState === WebSocket.OPEN && c !== excludeWs) c.send(payload);
     });
 }
 
 function broadcastToOwners(room, payload, excludeWs) {
     (rooms[room] || []).forEach(c => {
-        if (c.readyState === WebSocket.OPEN
-            && c !== excludeWs
-            && c._username
-            && isOwner(room, c._username))
-        {
+        if (c.readyState === WebSocket.OPEN && c !== excludeWs && c._username && isOwner(room, c._username)) {
             c.send(payload);
         }
     });
@@ -98,8 +86,7 @@ function broadcastToOwners(room, payload, excludeWs) {
 
 function sendToUser(username, obj) {
     const ws = userMap[username];
-    if (ws && ws.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify(obj));
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
 function broadcastOnline(room) {
@@ -107,22 +94,14 @@ function broadcastOnline(room) {
     broadcastToRoom(room, JSON.stringify({ type: "online_count", count: active.length }));
     const scriptList = (rooms[room] || [])
         .filter(c => c._username && c.readyState === WebSocket.OPEN && scriptUsers.has(c._username))
-        .map(c => ({
-            user:  c._username,
-            role:  getRole(room, c._username),
-            jobId: userJobIds[c._username] || null,
-        }));
+        .map(c => ({ user: c._username, role: getRole(room, c._username), jobId: userJobIds[c._username] || null }));
     broadcastToRoom(room, JSON.stringify({ type: "script_users", users: scriptList }));
 }
 
 function sendUserList(room, targetWs) {
     const scriptList = (rooms[room] || [])
         .filter(c => c._username && c.readyState === WebSocket.OPEN && scriptUsers.has(c._username))
-        .map(c => ({
-            user:  c._username,
-            role:  getRole(room, c._username),
-            jobId: userJobIds[c._username] || null,
-        }));
+        .map(c => ({ user: c._username, role: getRole(room, c._username), jobId: userJobIds[c._username] || null }));
     if (targetWs && targetWs.readyState === WebSocket.OPEN) {
         targetWs.send(JSON.stringify({ type: "user_list", users: scriptList }));
         if (chatHistory[room] && chatHistory[room].length > 0)
@@ -147,7 +126,6 @@ wss.on("connection", function(ws) {
         try {
             const msg = JSON.parse(data);
 
-            // ── JOIN ──────────────────────────────────────────────────────────
             if (msg.type === "join") {
                 const username = (msg.user || "Unknown").trim();
                 if (banned.has(username)) {
@@ -164,28 +142,23 @@ wss.on("connection", function(ws) {
                 userMap[currentUser] = ws;
                 scriptUsers.add(currentUser);
 
-                if (msg.jobId && msg.jobId !== "")
-                    userJobIds[currentUser] = msg.jobId;
+                if (msg.jobId && msg.jobId !== "") userJobIds[currentUser] = msg.jobId;
 
                 const myRole = getRole(currentRoom, currentUser);
                 ws.send(JSON.stringify({ type: "my_role", role: myRole }));
                 sendUserList(currentRoom, ws);
-                broadcastToRoom(currentRoom, JSON.stringify({
-                    type: "system", text: `${currentUser} joined.`
-                }), ws);
+                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `${currentUser} joined.` }), ws);
                 broadcastOnline(currentRoom);
                 return;
             }
 
             if (!currentRoom || !currentUser) return;
 
-            // ── PING (Keepalive) ──────────────────────────────────────────────
             if (msg.type === "ping") {
                 ws.send(JSON.stringify({ type: "pong" }));
                 return;
             }
 
-            // ── CHAT ──────────────────────────────────────────────────────────
             if (msg.type === "chat") {
                 if (muted.has(currentUser)) {
                     sendToUser(currentUser, { type: "system", text: "You are muted." });
@@ -207,12 +180,7 @@ wss.on("connection", function(ws) {
                         case "clear":  chatHistory[currentRoom] = []; broadcastToRoom(currentRoom, JSON.stringify({ type: "clear" })); break;
                         case "announce": {
                             const announceText = args.join(" ");
-                            broadcastToRoom(currentRoom, JSON.stringify({
-                                type: "announce_exec",
-                                text: announceText,
-                                from: currentUser,
-                                target: "*",
-                            }));
+                            broadcastToRoom(currentRoom, JSON.stringify({ type: "announce_exec", text: announceText, from: currentUser, target: "*" }));
                             const m = { type: "announce", text: announceText, from: currentUser };
                             broadcastToRoom(currentRoom, JSON.stringify(m));
                             saveChatMsg(currentRoom, m);
@@ -230,7 +198,6 @@ wss.on("connection", function(ws) {
                 return;
             }
 
-            // ── UPDATE JOBID ──────────────────────────────────────────────────
             if (msg.type === "update_jobid") {
                 if (msg.jobId && msg.jobId !== "") {
                     userJobIds[currentUser] = msg.jobId;
@@ -239,83 +206,42 @@ wss.on("connection", function(ws) {
                 return;
             }
 
-            // ── POS BROADCAST ─────────────────────────────────────────────────
             if (msg.type === "pos_broadcast") {
                 if (posSharing.has(currentUser)) {
-                    const relay = JSON.stringify({
-                        type: "pos_broadcast", action: "share_pos",
-                        from: currentUser, x: msg.x, y: msg.y, z: msg.z,
-                    });
+                    const relay = JSON.stringify({ type: "pos_broadcast", action: "share_pos", from: currentUser, x: msg.x, y: msg.y, z: msg.z });
                     broadcastToOwners(currentRoom, relay, ws);
                 }
                 return;
             }
 
-            // ── ANNOUNCE EXEC ─────────────────────────────────────────────────
             if (msg.type === "announce_exec") {
-                if (!canControl(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
-                    return;
-                }
-                const announcePayload = JSON.stringify({
-                    type:   "announce_exec",
-                    text:   msg.text || "",
-                    from:   currentUser,
-                    target: msg.target || "*",
-                });
-                if (msg.target === "*") {
-                    broadcastToRoom(currentRoom, announcePayload, ws);
-                } else {
-                    sendToUser(msg.target, JSON.parse(announcePayload));
-                }
+                if (!canControl(currentRoom, currentUser)) return;
+                const announcePayload = JSON.stringify({ type: "announce_exec", text: msg.text || "", from: currentUser, target: msg.target || "*" });
+                if (msg.target === "*") broadcastToRoom(currentRoom, announcePayload, ws);
+                else sendToUser(msg.target, JSON.parse(announcePayload));
                 const m = { type: "announce", text: msg.text, from: currentUser };
                 broadcastToRoom(currentRoom, JSON.stringify(m));
                 saveChatMsg(currentRoom, m);
                 return;
             }
 
-            // ── EXEC RELAY (Op Executor & VIP scripts) ───────────────────────
             if (msg.type === "exec_relay") {
-                if (!canControl(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
-                    return;
-                }
-                const execPayload = JSON.stringify({
-                    type:        "control",
-                    action:      "exec_script",
-                    target:      msg.target || "*",
-                    script_code: msg.script_code || "",
-                    silent:      true,
-                });
-                if (msg.target === "*") {
-                    broadcastToRoom(currentRoom, execPayload, ws);
-                } else {
-                    const tw = userMap[msg.target];
-                    if (tw && tw.readyState === WebSocket.OPEN)
-                        tw.send(execPayload);
-                }
+                if (!canControl(currentRoom, currentUser)) return;
+                const execPayload = JSON.stringify({ type: "control", action: "exec_script", target: msg.target || "*", script_code: msg.script_code || "", silent: true });
+                if (msg.target === "*") broadcastToRoom(currentRoom, execPayload, ws);
+                else { const tw = userMap[msg.target]; if (tw && tw.readyState === WebSocket.OPEN) tw.send(execPayload); }
                 return;
             }
 
-            // ── CONTROL (owner only) ──────────────────────────────────────────
             if (msg.type === "control") {
-                if (!canControl(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
-                    return;
-                }
+                if (!canControl(currentRoom, currentUser)) return;
                 const target = msg.target;
                 const action = msg.action;
                 const silentActions = new Set([
-                    "exec_script","silent_on","silent_off","enable_autoload",
-                    "invincible","uninvincible","bring",
-                    "copy_jobid","join_server","pull_server",
-                    "start_pos_share","stop_pos_share","share_pos",
-                    "no_sleep_on","no_sleep_off",
-                    "invisible_self","visible_self",
-                    "invisible_other","visible_other",
-                    "force_chat","loop_kill","loop_freeze",
-                    "loop_fling","spin","noclip","antigrav",
-                    "respawn","force_dance",
+                    "exec_script","silent_on","silent_off","enable_autoload","invincible","uninvincible","bring",
+                    "copy_jobid","join_server","pull_server","start_pos_share","stop_pos_share","share_pos",
+                    "no_sleep_on","no_sleep_off","invisible_self","visible_self","invisible_other","visible_other",
+                    "force_chat","loop_kill","loop_freeze","loop_fling","spin","noclip","antigrav","respawn","force_dance",
                 ]);
                 const isSilent = silentActions.has(action) || msg.silent === true;
 
@@ -323,58 +249,36 @@ wss.on("connection", function(ws) {
                 if (action === "stop_pos_share"  && target !== "*") posSharing.delete(target);
 
                 if (target === "*") {
-                    (rooms[currentRoom] || []).forEach(c => {
-                        if (c !== ws && c.readyState === WebSocket.OPEN)
-                            c.send(JSON.stringify(msg));
-                    });
+                    (rooms[currentRoom] || []).forEach(c => { if (c !== ws && c.readyState === WebSocket.OPEN) c.send(JSON.stringify(msg)); });
                 } else {
                     const tw = userMap[target];
-                    if (tw && tw.readyState === WebSocket.OPEN)
-                        tw.send(JSON.stringify(msg));
+                    if (tw && tw.readyState === WebSocket.OPEN) tw.send(JSON.stringify(msg));
                 }
-                if (!isSilent)
-                    broadcastToRoom(currentRoom, JSON.stringify({
-                        type: "system", text: `[OWNER:${currentUser}] ${action.toUpperCase()} → ${target}`
-                    }));
+                if (!isSilent) broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `[OWNER:${currentUser}] ${action.toUpperCase()} → ${target}` }));
                 return;
             }
 
-            // ── GRANT ROLE ────────────────────────────────────────────────────
             if (msg.type === "grant_role") {
-                if (!isOwner(currentRoom, currentUser)) {
-                    sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
-                    return;
-                }
-                const target = msg.target;
-                const role   = msg.role;
+                if (!isOwner(currentRoom, currentUser)) return;
+                const target = msg.target; const role = msg.role;
                 if (!target || !["owner","vip","user"].includes(role)) return;
-                if (role === "user") {
-                    delete roomRoles[currentRoom][target];
-                } else {
-                    roomRoles[currentRoom][target] = role;
-                }
+                if (role === "user") delete roomRoles[currentRoom][target];
+                else roomRoles[currentRoom][target] = role;
                 sendToUser(target, { type: "my_role", role });
                 broadcastToRoom(currentRoom, JSON.stringify({ type: "role_update", target, role }));
                 const emoji = role === "owner" ? "👑" : role === "vip" ? "⭐" : "👤";
-                broadcastToRoom(currentRoom, JSON.stringify({
-                    type: "system",
-                    text: `${emoji} ${target} granted [${role.toUpperCase()}] by ${currentUser}.`
-                }));
+                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `${emoji} ${target} granted [${role.toUpperCase()}] by ${currentUser}.` }));
                 broadcastOnline(currentRoom);
                 return;
             }
 
-            // ── KICK FROM GAME ────────────────────────────────────────────────
             if (msg.type === "kick_user") {
                 if (!canControl(currentRoom, currentUser)) return;
                 sendToUser(msg.target, { type: "control", action: "kick_game", target: msg.target });
-                broadcastToRoom(currentRoom, JSON.stringify({
-                    type: "system", text: `🚪 ${msg.target} kicked by ${currentUser}.`
-                }));
+                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `🚪 ${msg.target} kicked by ${currentUser}.` }));
                 return;
             }
 
-            // ── CLEAR CHAT ────────────────────────────────────────────────────
             if (msg.type === "clear_chat") {
                 if (!canControl(currentRoom, currentUser)) return;
                 chatHistory[currentRoom] = [];
@@ -382,7 +286,6 @@ wss.on("connection", function(ws) {
                 return;
             }
 
-            // ── GET JOBID ─────────────────────────────────────────────────────
             if (msg.type === "get_jobid") {
                 if (!canControl(currentRoom, currentUser)) return;
                 const jid = userJobIds[msg.target] || null;
@@ -405,9 +308,7 @@ wss.on("connection", function(ws) {
         if (currentRoom && rooms[currentRoom]) {
             rooms[currentRoom] = rooms[currentRoom].filter(c => c !== ws);
             if (rooms[currentRoom].length > 0) {
-                broadcastToRoom(currentRoom, JSON.stringify({
-                    type: "system", text: `${currentUser} left.`
-                }));
+                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `${currentUser} left.` }));
                 broadcastOnline(currentRoom);
             } else {
                 delete rooms[currentRoom];
