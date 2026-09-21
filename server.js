@@ -1,10 +1,9 @@
-// MiyooOwnerPanel v7.1 — server.js
+// MiyooOwnerPanel v7.3 — server.js
 // by kzynusOtheraccount & Verity
 
 const http       = require("http");
 const WebSocket  = require("ws");
 
-// Railway tự động cấp PORT qua process.env.PORT
 const port = process.env.PORT || 3000;
 
 const httpServer = http.createServer((req, res) => {
@@ -15,7 +14,7 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server: httpServer });
 
 httpServer.listen(port, "0.0.0.0", () => {
-    console.log("MiyooOwnerPanel v7.1 running on port " + port);
+    console.log("MiyooOwnerPanel v7.3 running on port " + port);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,6 +32,7 @@ let scriptUsers = new Set();
 let userJobIds  = {};
 let chatHistory = {};
 let posSharing  = new Set();
+let allKnownUsers = new Set(); // Lưu lại tất cả user từng kết nối
 
 function ensureRoom(room) {
     if (!rooms[room])     rooms[room]     = [];
@@ -50,22 +50,6 @@ function getRole(room, username) {
 function isOwner(room, username) { return getRole(room, username) === "owner"; }
 function isVip(room, username)   { const r = getRole(room, username); return r === "owner" || r === "vip"; }
 function canControl(room, username) { return isOwner(room, username); }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BAD WORD FILTER
-// ─────────────────────────────────────────────────────────────────────────────
-const BAD_WORDS = [
-    "nigger","nigga","fuck","shit","bitch","dick","pussy","cunt",
-    "địt","lồn","cặc","buồi","đụ","đéo","mẹ mày","bố mày",
-];
-function filterBadWords(text) {
-    let r = text;
-    for (const w of BAD_WORDS) {
-        const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        r = r.replace(new RegExp(`\\b${esc}\\b`, "gi"), "*".repeat(w.length));
-    }
-    return r;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -141,6 +125,7 @@ wss.on("connection", function(ws) {
                 rooms[currentRoom].push(ws);
                 userMap[currentUser] = ws;
                 scriptUsers.add(currentUser);
+                allKnownUsers.add(currentUser); // Thêm vào danh sách lịch sử
 
                 if (msg.jobId && msg.jobId !== "") userJobIds[currentUser] = msg.jobId;
 
@@ -156,6 +141,13 @@ wss.on("connection", function(ws) {
 
             if (msg.type === "ping") {
                 ws.send(JSON.stringify({ type: "pong" }));
+                return;
+            }
+
+            if (msg.type === "get_all_users") {
+                if (canControl(currentRoom, currentUser)) {
+                    sendToUser(currentUser, { type: "all_users_list", users: Array.from(allKnownUsers) });
+                }
                 return;
             }
 
@@ -178,21 +170,12 @@ wss.on("connection", function(ws) {
                         case "mute":   muted.add(args[0]);    sendToUser(args[0], { type: "system", text: "You are muted." }); break;
                         case "unmute": muted.delete(args[0]); sendToUser(args[0], { type: "system", text: "You are unmuted." }); break;
                         case "clear":  chatHistory[currentRoom] = []; broadcastToRoom(currentRoom, JSON.stringify({ type: "clear" })); break;
-                        case "announce": {
-                            const announceText = args.join(" ");
-                            broadcastToRoom(currentRoom, JSON.stringify({ type: "announce_exec", text: announceText, from: currentUser, target: "*" }));
-                            const m = { type: "announce", text: announceText, from: currentUser };
-                            broadcastToRoom(currentRoom, JSON.stringify(m));
-                            saveChatMsg(currentRoom, m);
-                            break;
-                        }
                     }
                     return;
                 }
 
                 const role     = getRole(currentRoom, currentUser);
-                const filtered = filterBadWords(text);
-                const chatObj  = { type: "chat", user: currentUser, role, text: filtered };
+                const chatObj  = { type: "chat", user: currentUser, role, text: text };
                 broadcastToRoom(currentRoom, JSON.stringify(chatObj));
                 saveChatMsg(currentRoom, chatObj);
                 return;
@@ -219,9 +202,6 @@ wss.on("connection", function(ws) {
                 const announcePayload = JSON.stringify({ type: "announce_exec", text: msg.text || "", from: currentUser, target: msg.target || "*" });
                 if (msg.target === "*") broadcastToRoom(currentRoom, announcePayload, ws);
                 else sendToUser(msg.target, JSON.parse(announcePayload));
-                const m = { type: "announce", text: msg.text, from: currentUser };
-                broadcastToRoom(currentRoom, JSON.stringify(m));
-                saveChatMsg(currentRoom, m);
                 return;
             }
 
@@ -254,7 +234,6 @@ wss.on("connection", function(ws) {
                     const tw = userMap[target];
                     if (tw && tw.readyState === WebSocket.OPEN) tw.send(JSON.stringify(msg));
                 }
-                if (!isSilent) broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `[OWNER:${currentUser}] ${action.toUpperCase()} → ${target}` }));
                 return;
             }
 
@@ -266,8 +245,6 @@ wss.on("connection", function(ws) {
                 else roomRoles[currentRoom][target] = role;
                 sendToUser(target, { type: "my_role", role });
                 broadcastToRoom(currentRoom, JSON.stringify({ type: "role_update", target, role }));
-                const emoji = role === "owner" ? "👑" : role === "vip" ? "⭐" : "👤";
-                broadcastToRoom(currentRoom, JSON.stringify({ type: "system", text: `${emoji} ${target} granted [${role.toUpperCase()}] by ${currentUser}.` }));
                 broadcastOnline(currentRoom);
                 return;
             }
