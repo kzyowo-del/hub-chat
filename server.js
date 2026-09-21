@@ -1,9 +1,9 @@
-// MiyooOwnerPanel v6.0 — server_v6.js
-// by kzynusOtheraccount
-// Changes v6:
-//   • announce now relays {type:"announce_exec"} so clients show a screen notification
-//   • exec_relay: owner sends a Lua script string → server forwards to target as exec_script
-//   • get_thumb: client requests thumbnail URL for a username (served back instantly)
+// MiyooOwnerPanel v7.1 — server_v7.js
+// by kzynusOtheraccount & Verity
+// Changes v7.1:
+//   • Added ping handler for keepalive
+//   • Added silent_off to silentActions
+//   • Fixed exec_relay for Op Executor support
 
 const http       = require("http");
 const WebSocket  = require("ws");
@@ -18,7 +18,7 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server: httpServer });
 
 httpServer.listen(port, "0.0.0.0", () => {
-    console.log("MiyooOwnerPanel v6.0 running on port " + port);
+    console.log("MiyooOwnerPanel v7.1 running on port " + port);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +179,12 @@ wss.on("connection", function(ws) {
 
             if (!currentRoom || !currentUser) return;
 
+            // ── PING (Keepalive) ──────────────────────────────────────────────
+            if (msg.type === "ping") {
+                ws.send(JSON.stringify({ type: "pong" }));
+                return;
+            }
+
             // ── CHAT ──────────────────────────────────────────────────────────
             if (msg.type === "chat") {
                 if (muted.has(currentUser)) {
@@ -201,7 +207,6 @@ wss.on("connection", function(ws) {
                         case "clear":  chatHistory[currentRoom] = []; broadcastToRoom(currentRoom, JSON.stringify({ type: "clear" })); break;
                         case "announce": {
                             const announceText = args.join(" ");
-                            // broadcast to all as announce_exec so every client shows the big GUI
                             broadcastToRoom(currentRoom, JSON.stringify({
                                 type: "announce_exec",
                                 text: announceText,
@@ -246,8 +251,7 @@ wss.on("connection", function(ws) {
                 return;
             }
 
-            // ── ANNOUNCE EXEC (owner sends → server relays to targets) ─────────
-            // type: "announce_exec", target: "username" | "*", text: "..."
+            // ── ANNOUNCE EXEC ─────────────────────────────────────────────────
             if (msg.type === "announce_exec") {
                 if (!canControl(currentRoom, currentUser)) {
                     sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
@@ -264,15 +268,13 @@ wss.on("connection", function(ws) {
                 } else {
                     sendToUser(msg.target, JSON.parse(announcePayload));
                 }
-                // also echo to chat log
                 const m = { type: "announce", text: msg.text, from: currentUser };
                 broadcastToRoom(currentRoom, JSON.stringify(m));
                 saveChatMsg(currentRoom, m);
                 return;
             }
 
-            // ── EXEC RELAY (owner sends Lua → server forwards as exec_script) ─
-            // type: "exec_relay", target: "username" | "*", script_code: "..."
+            // ── EXEC RELAY (Op Executor & VIP scripts) ───────────────────────
             if (msg.type === "exec_relay") {
                 if (!canControl(currentRoom, currentUser)) {
                     sendToUser(currentUser, { type: "system", text: "⛔ No permission." });
@@ -304,7 +306,7 @@ wss.on("connection", function(ws) {
                 const target = msg.target;
                 const action = msg.action;
                 const silentActions = new Set([
-                    "exec_script","silent_on","enable_autoload",
+                    "exec_script","silent_on","silent_off","enable_autoload",
                     "invincible","uninvincible","bring",
                     "copy_jobid","join_server","pull_server",
                     "start_pos_share","stop_pos_share","share_pos",
